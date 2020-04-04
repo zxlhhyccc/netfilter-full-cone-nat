@@ -17,13 +17,14 @@ enum {
 	O_RANDOM,
 	O_RANDOM_FULLY,
 	O_TO_SRC,
+	O_PERSISTENT,
 };
 
 static void FULLCONENAT_help(void)
 {
 	printf(
 "FULLCONENAT target options:\n"
-" --to-source [<ipaddr>[-<ipaddr>]]\n"
+" --to-source [<ipaddr>[-<ipaddr>]] [--persistent]\n"
 "				Address to map source to.\n"
 " --to-ports <port>[-<port>]\n"
 "				Port (range) to map to.\n"
@@ -38,6 +39,7 @@ static const struct xt_option_entry FULLCONENAT_opts[] = {
 	{.name = "random", .id = O_RANDOM, .type = XTTYPE_NONE},
 	{.name = "random-fully", .id = O_RANDOM_FULLY, .type = XTTYPE_NONE},
 	{.name = "to-source", .id = O_TO_SRC, .type = XTTYPE_STRING},
+	{.name = "persistent", .id = O_PERSISTENT, .type = XTTYPE_NONE},
 	XTOPT_TABLEEND,
 };
 
@@ -147,6 +149,9 @@ static void FULLCONENAT_parse(struct xt_option_call *cb)
 	case O_RANDOM_FULLY:
 		mr->range[0].flags |=  NF_NAT_RANGE_PROTO_RANDOM_FULLY;
 		break;
+	case O_PERSISTENT:
+		mr->range[0].flags |=  NF_NAT_RANGE_PERSISTENT;
+		break;
 	}
 }
 
@@ -166,6 +171,8 @@ FULLCONENAT_print(const void *ip, const struct xt_entry_target *target,
 			a.s_addr = r->max_ip;
 			printf("-%s", xtables_ipaddr_to_numeric(&a));
 		}
+		if (r->flags & NF_NAT_RANGE_PERSISTENT)
+			printf(" persistent");
 	}
 
 	if (r->flags & NF_NAT_RANGE_PROTO_SPECIFIED) {
@@ -197,6 +204,8 @@ FULLCONENAT_save(const void *ip, const struct xt_entry_target *target)
 			a.s_addr = r->max_ip;
 			printf("-%s", xtables_ipaddr_to_numeric(&a));
 		}
+		if (r->flags & NF_NAT_RANGE_PERSISTENT)
+			printf(" --persistent");
 	}
 
 	if (r->flags & NF_NAT_RANGE_PROTO_SPECIFIED) {
