@@ -68,8 +68,8 @@ struct nat_mapping_original_tuple {
 };
 
 struct nat_mapping {
-  uint16_t port;     /* external UDP port */
-  int ifindex;       /* external interface index*/
+  uint16_t port;     /* external source port */
+  __be32 addr;       /* external source ip address */
 
   __be32 int_addr;   /* internal source ip address */
   uint16_t int_port; /* internal source port */
@@ -575,7 +575,7 @@ static char* nf_ct_stringify_tuple(const struct nf_conntrack_tuple *t) {
   return tuple_tmp_string;
 }
 
-static struct nat_mapping* allocate_mapping(const __be32 int_addr, const uint16_t int_port, const uint16_t port, const int ifindex) {
+static struct nat_mapping* allocate_mapping(const __be32 int_addr, const uint16_t int_port, const uint16_t port, const __be32 addr) {
   struct nat_mapping *p_new;
   u32 hash_src;
 
@@ -584,10 +584,10 @@ static struct nat_mapping* allocate_mapping(const __be32 int_addr, const uint16_
     pr_debug("xt_FULLCONENAT: ERROR: kmalloc() for new nat_mapping failed.\n");
     return NULL;
   }
+  p_new->addr = addr;
   p_new->port = port;
   p_new->int_addr = int_addr;
   p_new->int_port = int_port;
-  p_new->ifindex = ifindex;
   p_new->refer_count = 0;
   (p_new->original_tuple_list).next = &(p_new->original_tuple_list);
   (p_new->original_tuple_list).prev = &(p_new->original_tuple_list);
@@ -597,8 +597,8 @@ static struct nat_mapping* allocate_mapping(const __be32 int_addr, const uint16_
   hash_add(mapping_table_by_ext_port, &p_new->node_by_ext_port, port);
   hash_add(mapping_table_by_int_src, &p_new->node_by_int_src, hash_src);
 
-  pr_debug("xt_FULLCONENAT: new mapping allocated for %pI4:%d ==> %d\n", 
-    &p_new->int_addr, p_new->int_port, p_new->port);
+  pr_debug("xt_FULLCONENAT: new mapping allocated for %pI4:%d ==> %pI4:%d\n", 
+    &p_new->int_addr, p_new->int_port, &p_new->addr, p_new->port);
 
   return p_new;
 }
@@ -614,11 +614,12 @@ static void add_original_tuple_to_mapping(struct nat_mapping *mapping, const str
   (mapping->refer_count)++;
 }
 
-static struct nat_mapping* get_mapping_by_ext_port(const uint16_t port, const int ifindex) {
+static struct nat_mapping* get_mapping_by_int_src(const __be32 src_ip, const uint16_t src_port, const __be32 ext_ip) {
   struct nat_mapping *p_current;
+  u32 hash_src = HASH_2(src_ip, (u32)src_port);
 
-  hash_for_each_possible(mapping_table_by_ext_port, p_current, node_by_ext_port, port) {
-    if (p_current->port == port && p_current->ifindex == ifindex) {
+  hash_for_each_possible(mapping_table_by_int_src, p_current, node_by_int_src, hash_src) {
+    if (p_current->int_addr == src_ip && p_current->int_port == src_port && p_current->addr == ext_ip) {
       return p_current;
     }
   }
@@ -626,12 +627,12 @@ static struct nat_mapping* get_mapping_by_ext_port(const uint16_t port, const in
   return NULL;
 }
 
-static struct nat_mapping* get_mapping_by_int_src(const __be32 src_ip, const uint16_t src_port) {
+static struct nat_mapping* get_mapping_by_int_src_inrange(const __be32 src_ip, const uint16_t src_port, const __be32 min_ip, const __be32 max_ip) {
   struct nat_mapping *p_current;
   u32 hash_src = HASH_2(src_ip, (u32)src_port);
 
   hash_for_each_possible(mapping_table_by_int_src, p_current, node_by_int_src, hash_src) {
-    if (p_current->int_addr == src_ip && p_current->int_port == src_port) {
+    if (p_current->int_addr == src_ip && p_current->int_port == src_port && memcmp(&p_current->addr, &min_ip, sizeof(__be32)) >=0 && memcmp(&p_current->addr, &max_ip, sizeof(__be32)) <= 0) {
       return p_current;
     }
   }
@@ -698,14 +699,6 @@ static int check_mapping(struct nat_mapping* mapping, struct net *net, const u16
   struct nf_conntrack_tuple_hash *tuple_hash;
   struct nf_conn *ct;
 
-  if (mapping == NULL) {
-    return 0;
-  }
-
-  if (mapping->port == 0 || mapping->int_addr == 0 || mapping->int_port == 0 || mapping->ifindex == -1) {
-    return 0;
-  }
-
   /* for dying/unconfirmed conntrack tuples, an IPCT_DESTROY event may NOT be fired.
    * so we manually kill one of those tuples once we acquire one. */
 
@@ -722,7 +715,7 @@ static int check_mapping(struct nat_mapping* mapping, struct net *net, const u16
       (mapping->refer_count)--;
     } else {
       ct = nf_ct_tuplehash_to_ctrack(tuple_hash);
-      if (ct != NULL)
+      if (likely(ct != NULL))
         nf_ct_put(ct);
     }
 
@@ -739,12 +732,29 @@ static int check_mapping(struct nat_mapping* mapping, struct net *net, const u16
   }
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 3, 0)
+static struct nat_mapping* get_mapping_by_ext_port(const uint16_t port, const __be32 ext_ip, struct net *net, const struct nf_conntrack_zone *zone) {
+#else
+static struct nat_mapping* get_mapping_by_ext_port(const uint16_t port, const __be32 ext_ip, struct net *net, const u16 zone) {
+#endif
+  struct nat_mapping *p_current;
+  struct hlist_node *tmp;
+
+  hash_for_each_possible_safe(mapping_table_by_ext_port, p_current, tmp, node_by_ext_port, port) {
+    if (p_current->port == port && check_mapping(p_current, net, zone) && p_current->addr == ext_ip) {
+      return p_current;
+    }
+  }
+
+  return NULL;
+}
+
 static void handle_dying_tuples(void) {
   struct list_head *iter, *tmp, *iter_2, *tmp_2;
   struct tuple_list *item;
   struct nf_conntrack_tuple *ct_tuple;
   struct nat_mapping *mapping;
-  __be32 ip;
+  __be32 ip, ext_ip;
   uint16_t port;
   struct nat_mapping_original_tuple *original_tuple_item;
 #if IS_ENABLED(CONFIG_NF_NAT_IPV6) || (IS_ENABLED(CONFIG_IPV6) && LINUX_VERSION_CODE >= KERNEL_VERSION(5, 1, 0))
@@ -813,12 +823,14 @@ static void handle_dying_tuples(void) {
 
     ip = (ct_tuple->src).u3.ip;
     port = be16_to_cpu((ct_tuple->src).u.udp.port);
-    mapping = get_mapping_by_int_src(ip, port);
+    ext_ip = item->tuple_reply.dst.u3.ip;
+    mapping = get_mapping_by_int_src(ip, port, ext_ip);
     if (mapping == NULL) {
+      ext_ip = (ct_tuple->dst).u3.ip;
       ct_tuple = &(item->tuple_reply);
       ip = (ct_tuple->src).u3.ip;
       port = be16_to_cpu((ct_tuple->src).u.udp.port);
-      mapping = get_mapping_by_int_src(ip, port);
+      mapping = get_mapping_by_int_src(ip, port, ext_ip);
       if (mapping != NULL) {
         pr_debug("xt_FULLCONENAT: handle_dying_tuples(): INBOUND dying conntrack at ext port %d\n", mapping->port);
       }
@@ -942,9 +954,9 @@ static __be32 get_device_ip(const struct net_device* dev) {
 }
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 3, 0)
-static uint16_t find_appropriate_port(struct net *net, const struct nf_conntrack_zone *zone, const uint16_t original_port, const int ifindex, const struct nf_nat_ipv4_range *range) {
+static uint16_t find_appropriate_port(struct net *net, const struct nf_conntrack_zone *zone, const uint16_t original_port, const __be32 ext_ip, const struct nf_nat_ipv4_range *range) {
 #else
-static uint16_t find_appropriate_port(struct net *net, const u16 zone, const uint16_t original_port, const int ifindex, const struct nf_nat_ipv4_range *range) {
+static uint16_t find_appropriate_port(struct net *net, const u16 zone, const uint16_t original_port, const __be32 ext_ip, const struct nf_nat_ipv4_range *range) {
 #endif
   uint16_t min, start, selected, range_size, i;
   struct nat_mapping* mapping = NULL;
@@ -969,8 +981,8 @@ static uint16_t find_appropriate_port(struct net *net, const u16 zone, const uin
     if ((original_port >= min && original_port <= min + range_size - 1)
       || !(range->flags & NF_NAT_RANGE_PROTO_SPECIFIED)) {
       /* 1. try to preserve the port if it's available */
-      mapping = get_mapping_by_ext_port(original_port, ifindex);
-      if (mapping == NULL || !(check_mapping(mapping, net, zone))) {
+      mapping = get_mapping_by_ext_port(original_port, ext_ip, net, zone);
+      if (mapping == NULL) {
         return original_port;
       }
     }
@@ -982,18 +994,40 @@ static uint16_t find_appropriate_port(struct net *net, const u16 zone, const uin
   for (i = 0; i < range_size; i++) {
     /* 2. try to find an available port */
     selected = min + ((start + i) % range_size);
-    mapping = get_mapping_by_ext_port(selected, ifindex);
-    if (mapping == NULL || !(check_mapping(mapping, net, zone))) {
+    mapping = get_mapping_by_ext_port(selected, ext_ip, net, zone);
+    if (mapping == NULL) {
       return selected;
     }
   }
 
   /* 3. at least we tried. override a previous mapping. */
   selected = min + start;
-  mapping = get_mapping_by_ext_port(selected, ifindex);
+  mapping = get_mapping_by_ext_port(selected, ext_ip, net, zone);
   kill_mapping(mapping);
 
   return selected;
+}
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 3, 0)
+static __be32 find_leastused_ip(const struct nf_conntrack_zone *zone, const struct nf_nat_ipv4_range *range, const __be32 src, const __be32 dst)
+#else
+static __be32 find_leastused_ip(const u16 zone, const struct nf_nat_ipv4_range *range, const __be32 src, const __be32 dst)
+#endif
+{
+  /* Host order */
+  u32 minip, maxip, j, dist;
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 3, 0)
+  j = jhash_1word((u32)src, range->flags & NF_NAT_RANGE_PERSISTENT ? 0 : dst ^ zone->id);
+#else
+  j = jhash_1word((u32)src, range->flags & NF_NAT_RANGE_PERSISTENT ? 0 : dst ^ zone);
+#endif
+
+  minip = ntohl(range->min_ip);
+  maxip = ntohl(range->max_ip);
+  dist  = maxip - minip + 1;
+
+  return (__be32) htonl(minip + reciprocal_scale(j, dist));
 }
 
 static unsigned int fullconenat_tg(struct sk_buff *skb, const struct xt_action_param *par)
@@ -1009,9 +1043,8 @@ static unsigned int fullconenat_tg(struct sk_buff *skb, const struct xt_action_p
   struct net *net;
   struct nf_conn *ct;
   enum ip_conntrack_info ctinfo;
+  struct nf_conn_nat *nat;
   struct nf_conntrack_tuple *ct_tuple, *ct_tuple_origin;
-
-  struct net_device *net_dev;
 
   struct nat_mapping *mapping, *src_mapping;
   unsigned int ret;
@@ -1021,10 +1054,9 @@ static unsigned int fullconenat_tg(struct sk_buff *skb, const struct xt_action_p
   struct nf_nat_range newrange;
 #endif
 
-  __be32 new_ip, ip;
+  __be32 ip;
   uint16_t port, original_port, want_port;
   uint8_t protonum;
-  int ifindex;
 
   ip = 0;
   original_port = 0;
@@ -1048,8 +1080,6 @@ static unsigned int fullconenat_tg(struct sk_buff *skb, const struct xt_action_p
 
   if (xt_hooknum(par) == NF_INET_PRE_ROUTING) {
     /* inbound packets */
-    ifindex = xt_in(par)->ifindex;
-
     ct_tuple_origin = &(ct->tuplehash[IP_CT_DIR_ORIGINAL].tuple);
 
     protonum = (ct_tuple_origin->dst).protonum;
@@ -1059,23 +1089,11 @@ static unsigned int fullconenat_tg(struct sk_buff *skb, const struct xt_action_p
     ip = (ct_tuple_origin->dst).u3.ip;
     port = be16_to_cpu((ct_tuple_origin->dst).u.udp.port);
 
-    /* get the corresponding ifindex by the dst_ip (aka. external ip of this host),
-     * in case the packet needs to be forwarded from another inbound interface. */
-    net_dev = ip_dev_find(net, ip);
-    if (net_dev != NULL) {
-      ifindex = net_dev->ifindex;
-      dev_put(net_dev);
-    }
-
     spin_lock_bh(&fullconenat_lock);
 
     /* find an active mapping based on the inbound port */
-    mapping = get_mapping_by_ext_port(port, ifindex);
-    if (mapping == NULL) {
-      spin_unlock_bh(&fullconenat_lock);
-      return ret;
-    }
-    if (check_mapping(mapping, net, zone)) {
+    mapping = get_mapping_by_ext_port(port, ip, net, zone);
+    if (mapping != NULL) {
       newrange.flags = NF_NAT_RANGE_MAP_IPS | NF_NAT_RANGE_PROTO_SPECIFIED;
       newrange.min_addr.ip = mapping->int_addr;
       newrange.max_addr.ip = mapping->int_addr;
@@ -1097,10 +1115,27 @@ static unsigned int fullconenat_tg(struct sk_buff *skb, const struct xt_action_p
 
   } else if (xt_hooknum(par) == NF_INET_POST_ROUTING) {
     /* outbound packets */
-    ifindex = xt_out(par)->ifindex;
-
     ct_tuple_origin = &(ct->tuplehash[IP_CT_DIR_ORIGINAL].tuple);
     protonum = (ct_tuple_origin->dst).protonum;
+
+    if(range->flags & NF_NAT_RANGE_MAP_IPS) {
+      newrange.min_addr.ip = mr->range[0].min_ip;
+      newrange.max_addr.ip = mr->range[0].max_ip;
+    } else {
+      newrange.min_addr.ip = get_device_ip(skb->dev);
+      if (unlikely(!newrange.min_addr.ip))
+        return NF_DROP;
+      newrange.max_addr.ip = newrange.min_addr.ip;
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 16, 0)
+      nat = nf_ct_nat_ext_add(ct);
+#else
+      nat = nfct_nat(ct);
+#endif
+      if (likely(nat))
+        nat->masq_index = xt_out(par)->ifindex;
+
+    }
 
     spin_lock_bh(&fullconenat_lock);
 
@@ -1108,7 +1143,11 @@ static unsigned int fullconenat_tg(struct sk_buff *skb, const struct xt_action_p
       ip = (ct_tuple_origin->src).u3.ip;
       original_port = be16_to_cpu((ct_tuple_origin->src).u.udp.port);
 
-      src_mapping = get_mapping_by_int_src(ip, original_port);
+      if (newrange.min_addr.ip != newrange.max_addr.ip)
+        src_mapping = get_mapping_by_int_src_inrange(ip, original_port, newrange.min_addr.ip, newrange.max_addr.ip);
+      else
+        src_mapping = get_mapping_by_int_src(ip, original_port, newrange.min_addr.ip);
+
       if (src_mapping != NULL && check_mapping(src_mapping, net, zone)) {
 
         /* outbound nat: if a previously established mapping is active,
@@ -1117,12 +1156,20 @@ static unsigned int fullconenat_tg(struct sk_buff *skb, const struct xt_action_p
         newrange.flags = NF_NAT_RANGE_MAP_IPS | NF_NAT_RANGE_PROTO_SPECIFIED;
         newrange.min_proto.udp.port = cpu_to_be16(src_mapping->port);
         newrange.max_proto = newrange.min_proto;
+        if (newrange.min_addr.ip != newrange.max_addr.ip) {
+          newrange.min_addr.ip = src_mapping->addr;
+          newrange.max_addr.ip = newrange.min_addr.ip;
+        }
 
       } else {
 
-        /* if not, we find a new external port to map to.
+        /* if not, we find a new external IP:port to map to.
          * the SNAT may fail so we should re-check the mapped port later. */
-        want_port = find_appropriate_port(net, zone, original_port, ifindex, range);
+        if (newrange.min_addr.ip != newrange.max_addr.ip) {
+          newrange.min_addr.ip = find_leastused_ip(zone, range, ip, (ct_tuple_origin->dst).u3.ip);
+          newrange.max_addr.ip = newrange.min_addr.ip;
+        }
+        want_port = find_appropriate_port(net, zone, original_port, newrange.min_addr.ip, range);
 
         newrange.flags = NF_NAT_RANGE_MAP_IPS | NF_NAT_RANGE_PROTO_SPECIFIED;
         newrange.min_proto.udp.port = cpu_to_be16(want_port);
@@ -1131,15 +1178,6 @@ static unsigned int fullconenat_tg(struct sk_buff *skb, const struct xt_action_p
         src_mapping = NULL;
 
       }
-    }
-
-    if(mr->range[0].flags & NF_NAT_RANGE_MAP_IPS) {
-      newrange.min_addr.ip = mr->range[0].min_ip;
-      newrange.max_addr.ip = mr->range[0].max_ip;
-    } else {
-      new_ip = get_device_ip(skb->dev);
-      newrange.min_addr.ip = new_ip;
-      newrange.max_addr.ip = new_ip;
     }
 
     /* do SNAT now */
@@ -1160,10 +1198,10 @@ static unsigned int fullconenat_tg(struct sk_buff *skb, const struct xt_action_p
 
     /* save the mapping information into our mapping table */
     mapping = src_mapping;
-    if (mapping == NULL || !check_mapping(mapping, net, zone)) {
-      mapping = allocate_mapping(ip, original_port, port, ifindex);
+    if (mapping == NULL) {
+      mapping = allocate_mapping(ip, original_port, port, (ct_tuple->dst).u3.ip);
     }
-    if (mapping != NULL) {
+    if (likely(mapping != NULL)) {
       add_original_tuple_to_mapping(mapping, ct_tuple_origin);
       pr_debug("xt_FULLCONENAT: fullconenat_tg(): OUTBOUND: refer_count for mapping at ext_port %d is now %d\n", mapping->port, mapping->refer_count);
     }
