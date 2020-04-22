@@ -490,11 +490,11 @@ static unsigned int fullconenat_tg6(struct sk_buff *skb, const struct xt_action_
 
     }
 
-    spin_lock_bh(&fullconenat6_lock);
-
     if (protonum == IPPROTO_UDP) {
       ip = &(ct_tuple_origin->src).u3;
       original_port = be16_to_cpu((ct_tuple_origin->src).u.udp.port);
+
+      spin_lock_bh(&fullconenat6_lock);
 
       if (!nf_inet_addr_cmp(&newrange.min_addr, &newrange.max_addr))
         src_mapping = get_mapping6_by_int_src_inrange(ip, original_port, &newrange.min_addr, &newrange.max_addr);
@@ -536,8 +536,12 @@ static unsigned int fullconenat_tg6(struct sk_buff *skb, const struct xt_action_
     /* do SNAT now */
     ret = nf_nat_setup_info(ct, &newrange, HOOK2MANIP(xt_hooknum(par)));
 
-    if (protonum != IPPROTO_UDP || ret != NF_ACCEPT) {
-      /* for non-UDP packets and failed SNAT, bailout */
+    if (protonum != IPPROTO_UDP) {
+      /* non-UDP packets, bailout */
+      return ret;
+    }
+    if (ret != NF_ACCEPT) {
+      /* failed SNAT, bailout */
       spin_unlock_bh(&fullconenat6_lock);
       return ret;
     }
@@ -1137,11 +1141,11 @@ static unsigned int fullconenat_tg(struct sk_buff *skb, const struct xt_action_p
 
     }
 
-    spin_lock_bh(&fullconenat_lock);
-
     if (protonum == IPPROTO_UDP) {
       ip = (ct_tuple_origin->src).u3.ip;
       original_port = be16_to_cpu((ct_tuple_origin->src).u.udp.port);
+
+      spin_lock_bh(&fullconenat_lock);
 
       if (newrange.min_addr.ip != newrange.max_addr.ip)
         src_mapping = get_mapping_by_int_src_inrange(ip, original_port, newrange.min_addr.ip, newrange.max_addr.ip);
@@ -1183,8 +1187,12 @@ static unsigned int fullconenat_tg(struct sk_buff *skb, const struct xt_action_p
     /* do SNAT now */
     ret = nf_nat_setup_info(ct, &newrange, HOOK2MANIP(xt_hooknum(par)));
 
-    if (protonum != IPPROTO_UDP || ret != NF_ACCEPT) {
-      /* for non-UDP packets and failed SNAT, bailout */
+    if (protonum != IPPROTO_UDP) {
+      /* non-UDP packets, bailout */
+      return ret;
+    }
+    if (ret != NF_ACCEPT) {
+      /* failed SNAT, bailout */
       spin_unlock_bh(&fullconenat_lock);
       return ret;
     }
