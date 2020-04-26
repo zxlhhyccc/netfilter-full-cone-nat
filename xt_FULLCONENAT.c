@@ -32,6 +32,14 @@
 #include <net/netfilter/nf_conntrack_tuple.h>
 #include <net/netfilter/nf_conntrack_core.h>
 #include <net/netfilter/nf_conntrack_ecache.h>
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 2, 0)
+#include <net/netfilter/nf_nat_masquerade.h>
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(3, 18, 0)
+#include <net/netfilter/ipv4/nf_nat_masquerade.h>
+#if IS_ENABLED(CONFIG_NF_NAT_MASQUERADE_IPV6)
+#include <net/netfilter/ipv6/nf_nat_masquerade.h>
+#endif
+#endif
 
 #define HASH_2(x, y) ((x + y) / 2 * (x + y + 1) + y)
 
@@ -1308,10 +1316,37 @@ static struct xt_target tg_reg[] __read_mostly = {
 
 static int __init fullconenat_tg_init(void)
 {
+  int ret;
   wq = create_singlethread_workqueue("xt_FULLCONENAT");
   if (wq == NULL) {
     printk("xt_FULLCONENAT: warning: failed to create workqueue\n");
   }
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 2, 0)
+  ret = nf_nat_masquerade_inet_register_notifiers();
+  if (unlikely(ret))
+    return ret;
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(3, 18, 0)
+  ret = nf_nat_masquerade_ipv4_register_notifier();
+  if (unlikely(ret))
+    return ret;
+#if IS_ENABLED(CONFIG_NF_NAT_MASQUERADE_IPV6)
+  ret = nf_nat_masquerade_ipv6_register_notifier();
+  if (unlikely(ret)) {
+    nf_nat_masquerade_ipv4_unregister_notifier();
+    return ret;
+  }
+#endif
+#else
+#if IS_MODULE(CONFIG_IP_NF_TARGET_MASQUERADE)
+  if (!xt_find_revision(AF_INET, "MASQUERADE", 0, 1, &ret))
+    request_module_nowait("ipt_MASQUERADE");
+#endif
+#if IS_MODULE(CONFIG_IP6_NF_TARGET_MASQUERADE)
+  if (!xt_find_revision(AF_INET6, "MASQUERADE", 0, 1, &ret))
+    request_module_nowait("ip6t_MASQUERADE");
+#endif
+#endif
 
   return xt_register_targets(tg_reg, ARRAY_SIZE(tg_reg));
 }
@@ -1319,6 +1354,15 @@ static int __init fullconenat_tg_init(void)
 static void fullconenat_tg_exit(void)
 {
   xt_unregister_targets(tg_reg, ARRAY_SIZE(tg_reg));
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 2, 0)
+  nf_nat_masquerade_inet_unregister_notifiers();
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(3, 18, 0)
+#if IS_ENABLED(CONFIG_NF_NAT_MASQUERADE_IPV6)
+  nf_nat_masquerade_ipv6_unregister_notifier();
+#endif
+  nf_nat_masquerade_ipv4_unregister_notifier();
+#endif
 
   if (wq) {
     cancel_delayed_work_sync(&gc_worker_wk);
