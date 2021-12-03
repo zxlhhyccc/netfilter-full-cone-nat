@@ -3,8 +3,9 @@
 *.ko
 *.cmd
 *.o
+*.so
 modules.order
 Module.symvers
-*.mod.c
+*.mod*
 .idea
 cmake*
