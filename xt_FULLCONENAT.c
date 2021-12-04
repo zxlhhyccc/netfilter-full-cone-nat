@@ -894,6 +894,8 @@ static void gc_worker(struct work_struct *work) {
 #ifdef CONFIG_NF_CONNTRACK_CHAIN_EVENTS
 static int ct_event_cb(struct notifier_block *this, unsigned long events, void *ptr) {
   struct nf_ct_event *item = ptr;
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0)
+static int ct_event_cb(unsigned int events, const struct nf_ct_event *item) {
 #else
 static int ct_event_cb(unsigned int events, struct nf_ct_event *item) {
 #endif
@@ -938,6 +940,12 @@ static int ct_event_cb(unsigned int events, struct nf_ct_event *item) {
 
   return 0;
 }
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0) && !defined(CONFIG_NF_CONNTRACK_CHAIN_EVENTS)
+static int exp_event_cb(unsigned int events, const struct nf_exp_event *item) {
+  return 0;
+}
+#endif
 
 static __be32 get_device_ip(const struct net_device* dev) {
   struct in_device* in_dev;
@@ -1242,11 +1250,19 @@ static int fullconenat_tg_check(const struct xt_tgchk_param *par)
   if (tg_refer_count == 1) {
 #ifdef CONFIG_NF_CONNTRACK_CHAIN_EVENTS
     ct_event_notifier.notifier_call = ct_event_cb;
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0)
+    ct_event_notifier.ct_event = ct_event_cb;
+    ct_event_notifier.exp_event = exp_event_cb;
 #else
     ct_event_notifier.fcn = ct_event_cb;
 #endif
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0) && !defined(CONFIG_NF_CONNTRACK_CHAIN_EVENTS)
+    nf_conntrack_register_notifier(par->net, &ct_event_notifier);
+    if (true) {
+#else
     if (nf_conntrack_register_notifier(par->net, &ct_event_notifier) == 0) {
+#endif
       ct_event_notifier_registered = 1;
       pr_debug("xt_FULLCONENAT: fullconenat_tg_check(): ct_event_notifier registered\n");
     } else {
@@ -1270,7 +1286,11 @@ static void fullconenat_tg_destroy(const struct xt_tgdtor_param *par)
 
   if (tg_refer_count == 0) {
     if (ct_event_notifier_registered) {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0) && !defined(CONFIG_NF_CONNTRACK_CHAIN_EVENTS)
+      nf_conntrack_unregister_notifier(par->net);
+#else
       nf_conntrack_unregister_notifier(par->net, &ct_event_notifier);
+#endif
       ct_event_notifier_registered = 0;
 
       pr_debug("xt_FULLCONENAT: fullconenat_tg_destroy(): ct_event_notifier unregistered\n");
