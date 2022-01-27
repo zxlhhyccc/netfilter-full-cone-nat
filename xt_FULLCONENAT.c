@@ -1346,7 +1346,7 @@ static int __init fullconenat_tg_init(void)
   ret = nf_nat_masquerade_inet_register_notifiers();
   if (unlikely(ret))
     return ret;
-#elif LINUX_VERSION_CODE >= KERNEL_VERSION(3, 18, 0)
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4, 19, 0)
   ret = nf_nat_masquerade_ipv4_register_notifier();
   if (unlikely(ret))
     return ret;
@@ -1356,6 +1356,11 @@ static int __init fullconenat_tg_init(void)
     nf_nat_masquerade_ipv4_unregister_notifier();
     return ret;
   }
+#endif
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(3, 18, 0)
+  nf_nat_masquerade_ipv4_register_notifier();
+#if IS_ENABLED(CONFIG_NF_NAT_MASQUERADE_IPV6)
+  nf_nat_masquerade_ipv6_register_notifier();
 #endif
 #else
 #if IS_MODULE(CONFIG_IP_NF_TARGET_MASQUERADE)
