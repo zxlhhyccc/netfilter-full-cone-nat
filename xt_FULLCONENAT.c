@@ -1258,8 +1258,8 @@ static int fullconenat_tg_check(const struct xt_tgchk_param *par)
 #endif
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0) && !defined(CONFIG_NF_CONNTRACK_CHAIN_EVENTS)
-    nf_conntrack_register_notifier(par->net, &ct_event_notifier);
-    if (true) {
+    if (!READ_ONCE(par->net->ct.nf_conntrack_event_cb)) {
+      nf_conntrack_register_notifier(par->net, &ct_event_notifier);
 #else
     if (nf_conntrack_register_notifier(par->net, &ct_event_notifier) == 0) {
 #endif
