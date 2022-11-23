@@ -235,6 +235,7 @@ static struct xtables_target fullconenat_tg_reg = {
 	.x6_options	= FULLCONENAT_opts,
 };
 
+#define _init __attribute__((constructor)) _INIT
 void _init(void)
 {
 	xtables_register_target(&fullconenat_tg_reg);
